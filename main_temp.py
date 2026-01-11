@@ -24,11 +24,11 @@ def load_pair(i, skip = 1):
     return image1, image2, img1_path, img2_path
 
 
-def ORB_keypoints_and_descriptors(image):
+def ORB_keypoints_and_descriptors(image, mask=None):
     # Function to compute ORB keypoints and descriptors
     print("Computing ORB keypoints and descriptors.")
     orb = cv2.ORB_create(nfeatures=5000)
-    keypoints, descriptors = orb.detectAndCompute(image, None)
+    keypoints, descriptors = orb.detectAndCompute(image, mask)
     print(f"Computed {len(keypoints)} keypoints.")
     print(f"Descriptors shape: {descriptors.shape if descriptors is not None else 'None'}")
     return keypoints, descriptors
@@ -55,10 +55,10 @@ def match_descriptors(desc1, desc2):
     #         good_matches.append(m)
 
     good_matches = sorted(matches, key=lambda x: x.distance)    
-    print(f"{len(good_matches)} matches passed Lowe's ratio test.")
+    print(f"{len(matches)} matches after cross-check matches.")
 
-    # # Keep only the top 80 matches
-    good_matches = good_matches[:80]
+    # Keep only the top 80 matches
+    good_matches = good_matches[:200]
     print(f"Retained top {len(good_matches)} matches after limiting.")
 
     return good_matches
@@ -88,7 +88,7 @@ def affine_estimation_ransac(pts1, pts2):
 
     n_inliers = int(np.sum(inliers))
     ratio = n_inliers / len(pts1)
-
+    print(f"Number of inliers: {n_inliers} out of {len(pts1)} (ratio: {ratio:.2f})")
     if (n_inliers < 30) or (ratio < 0.08):
         print("Affine estimation failed.")
         return None, None
@@ -109,8 +109,38 @@ def draw_inlier_matches(img1, kp1, img2, kp2, matches, inliers):
 
     inlier_matches = [m for m, keep in zip(matches, inlier_mask) if keep] 
 
+    # Only display the top 50 inlier matches for clarity
+    inlier_matches = inlier_matches[:50]
+
     img_matches = cv2.drawMatches(img1, kp1, img2, kp2, inlier_matches, None, flags=2)
     return img_matches
+
+def build_feature_mask(image, mode = "fixed"):
+    image_shape = image.shape
+    h, w = image_shape[:2]
+    border = int(0.08 * min(h, w))        # ~8% of smaller dimension
+    inner_margin = int(0.20 * min(h, w))
+    if mode == "fixed":
+        print("Using fixed feature mask.")
+        # Create a mask
+        mask = np.zeros((h, w), dtype=np.uint8)
+
+        # Allow features in a border region
+        mask[:border, :] = 255
+        mask[h-border:, :] = 255
+        mask[:, :border] = 255
+        mask[:, w-border:] = 255
+
+        # # Suppress features in the central region
+        # y1, y2 = inner_margin, h - inner_margin
+        # x1, x2 = inner_margin, w - inner_margin
+        # if y2 > y1 and x2 > x1:
+        #     mask[y1:y2, x1:x2] = 0
+
+    elif mode == "tray_detected":
+        return None
+    
+    return mask
     
 
 def main(i, skip):
@@ -118,14 +148,30 @@ def main(i, skip):
     print(p1, p2)
     print(img1.shape, img2.shape)
 
-    kp1, des1 = ORB_keypoints_and_descriptors(img1)
-    kp2, des2 = ORB_keypoints_and_descriptors(img2)
-    # cv2.imshow('Image 1', img1)
-    # cv2.imshow('Image 2', img2)
-    # cv2.waitKey(0)
-    # cv2.destroyAllWindows()
+    mask1 = build_feature_mask(img1, mode="fixed")
+    mask2 = build_feature_mask(img2, mode="fixed")
+
+    cv2.imshow("Mask", mask1)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+
+    kp1, des1 = ORB_keypoints_and_descriptors(img1, mask=mask1)
+    kp2, des2 = ORB_keypoints_and_descriptors(img2, mask=mask2)
+
+    print(f"Number of keypoints in image 1: {len(kp1)}")
+    print(f"Number of keypoints in image 2: {len(kp2)}")
+
+
+    if des1 is None or des2 is None or len(kp1) < 50 or len(kp2) < 50:
+        print("Too few keypoints/descriptors after masking.")
+        return
 
     matches = match_descriptors(des1, des2)
+    if len(matches) < 10:
+        print("Not enough matches found.")
+        return
+    print(f"Number of matches after filtering: {len(matches)}")
+
     pts1, pts2 = convert_to_point_arrays(kp1, kp2, matches)
     print(f"Number of matched points: {len(pts1)}")
     matrix, inliers = affine_estimation_ransac(pts1, pts2)
